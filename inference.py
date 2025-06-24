@@ -13,6 +13,9 @@ import soundfile as sf
 import torch.nn as nn
 from utils import demix_track, get_model_from_config
 
+import librosa
+
+
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -20,16 +23,25 @@ warnings.filterwarnings("ignore")
 def run_folder(model, args, config, device, verbose=False):
     start_time = time.time()
     model.eval()
-    all_mixtures_path = glob.glob(args.input_folder + '/*.wav')
+
+    # --- 变更 2: 搜索 .wav 和 .mp3 文件 ---
+    # 分别搜索两种格式，然后合并列表
+    print(f"正在搜索 '{args.input_folder}' 及其子目录下的 .wav 和 .mp3 文件...")
+    search_path_wav = os.path.join(args.input_folder, '**', '*.wav')
+    search_path_mp3 = os.path.join(args.input_folder, '**', '*.mp3')
+    
+    all_mixtures_path = glob.glob(search_path_wav, recursive=True) + glob.glob(search_path_mp3, recursive=True)
+    
     total_tracks = len(all_mixtures_path)
+    if total_tracks == 0:
+        print(f"在目录 '{args.input_folder}' 及其子目录中没有找到 .wav 或 .mp3 文件。")
+        return
+        
     print('Total tracks found: {}'.format(total_tracks))
 
     instruments = config.training.instruments
     if config.training.target_instrument is not None:
         instruments = [config.training.target_instrument]
-
-    if not os.path.isdir(args.store_dir):
-        os.mkdir(args.store_dir)
 
     if not verbose:
         all_mixtures_path = tqdm(all_mixtures_path)
@@ -37,13 +49,41 @@ def run_folder(model, args, config, device, verbose=False):
     first_chunk_time = None
 
     for track_number, path in enumerate(all_mixtures_path, 1):
-        print(f"\nProcessing track {track_number}/{total_tracks}: {os.path.basename(path)}")
+        # 使用 os.path.normpath 来标准化路径显示
+        print(f"\nProcessing track {track_number}/{total_tracks}: {os.path.normpath(path)}")
 
-        mix, sr = sf.read(path)
+        relative_path = os.path.relpath(path, args.input_folder)
+        # 获取不带扩展名的相对路径，用于构建输出文件名
+        relative_path_no_ext, _ = os.path.splitext(relative_path)
+        
+        output_dir = os.path.join(args.store_dir, os.path.dirname(relative_path_no_ext))
+        os.makedirs(output_dir, exist_ok=True) 
+
+        base_filename = os.path.basename(relative_path_no_ext)
+
+        # --- 变更 3: 使用 librosa 读取音频文件 ---
+        # librosa.load 可以处理 wav, mp3 等多种格式
+        # sr=None 会保留文件的原始采样率
+        # mono=False 会保留原始的通道数（立体声/单声道）
+        try:
+            mix, sr = librosa.load(path, sr=None, mono=False)
+            # librosa 返回的形状是 (channels, samples)，而模型代码期望 (samples, channels)
+            # 所以我们需要进行转置
+            mix = mix.T
+        except Exception as e:
+            print(f"  - Error loading file {path}: {e}")
+            continue # 跳过损坏或无法读取的文件
+        
+        # --- 变更 4: 更新单声道的判断逻辑 ---
+        # 因为 librosa 加载单声道文件后的 shape 是 (n_samples, 1)
         original_mono = False
-        if len(mix.shape) == 1:
+        if mix.ndim == 1:
             original_mono = True
             mix = np.stack([mix, mix], axis=-1)
+        elif mix.shape[1] == 1:
+            original_mono = True
+            # 将 (n_samples, 1) 形状的单声道数据复制为 (n_samples, 2)
+            mix = np.concatenate([mix, mix], axis=1)
 
         mixture = torch.tensor(mix.T, dtype=torch.float32)
 
@@ -60,23 +100,31 @@ def run_folder(model, args, config, device, verbose=False):
         for instr in instruments:
             vocals_output = res[instr].T
             if original_mono:
+                # 取一个声道作为输出即可
                 vocals_output = vocals_output[:, 0]
 
-            vocals_path = "{}/{}_{}.wav".format(args.store_dir, os.path.basename(path)[:-4], instr)
+            # 输出文件总是保存为 .wav 格式
+            vocals_path = os.path.join(output_dir, f"{base_filename}_{instr}.wav")
             sf.write(vocals_path, vocals_output, sr, subtype='FLOAT')
+
+        # --- 变更 5: 重新加载原始音频以计算伴奏 ---
+        # 使用 librosa 加载，并确保与处理时的数据类型和形状一致
+        original_mix, _ = librosa.load(path, sr=sr, mono=original_mono)
+        # 如果是立体声，需要转置
+        if not original_mono:
+            original_mix = original_mix.T
 
         vocals_output = res[instruments[0]].T
         if original_mono:
             vocals_output = vocals_output[:, 0]
-
-        original_mix, _ = sf.read(path)
+        
         instrumental = original_mix - vocals_output
 
-        instrumental_path = "{}/{}_instrumental.wav".format(args.store_dir, os.path.basename(path)[:-4])
+        instrumental_path = os.path.join(output_dir, f"{base_filename}_instrumental.wav")
         sf.write(instrumental_path, instrumental, sr, subtype='FLOAT')
 
     time.sleep(1)
-    print("Elapsed time: {:.2f} sec".format(time.time() - start_time))
+    print("\nElapsed time: {:.2f} sec".format(time.time() - start_time))
 
 
 def proc_folder(args):
