@@ -15,44 +15,46 @@ from utils import demix_track, get_model_from_config
 import librosa
 from pydub import AudioSegment
 
+# --- 新增: 导入 pymusickit 用于调性检测 ---
+from pymusickit.key_finder import KeyFinder
+
+
 import warnings
 
 warnings.filterwarnings("ignore")
 
 
-# --- 新增: BPM 和调性分析的辅助函数 ---
-def analyze_audio_properties(audio_mono, sr):
+# --- 修改: 更新 BPM 和调性分析的辅助函数 ---
+def analyze_audio_properties(audio_path, audio_mono, sr):
     """
-    分析单声道音频的BPM和调性。
+    分析音频的BPM和调性。
+    BPM 使用 librosa 检测。
+    调性使用 pymusickit 检测。
 
     Args:
-        audio_mono (np.ndarray): 单声道音频波形数据。
+        audio_path (str): 音频文件的路径 (pymusickit 需要)。
+        audio_mono (np.ndarray): 单声道音频波形数据 (librosa 需要)。
         sr (int): 采样率。
 
     Returns:
-        str: 格式化后的BPM和调性字符串，例如 "_120bpm_C-Major"。
-             如果分析失败，则返回空字符串。
+        str: 格式化后的BPM和调性字符串, 例如 "_120bpm_C-Major"。
+             如果分析失败, 则返回空字符串。
     """
     try:
-        # 1. BPM 检测
-        # librosa.beat.tempo 返回一个包含估计速度的数组，我们取第一个
+        # 1. BPM 检测 (使用 librosa, 保持不变)
         bpm = librosa.beat.tempo(y=audio_mono, sr=sr)[0]
         bpm_str = f"{int(round(bpm))}bpm"
 
-        # 2. 调性检测
-        # 首先计算色度图 (chromagram)
-        chroma = librosa.feature.chroma_stft(y=audio_mono, sr=sr)
-        # 使用 librosa 的内置函数估算调性
-        key_note, key_mode = librosa.feature.tonnetz(
-            y=librosa.effects.harmonic(audio_mono), sr=sr
-        )[-2:]
-        pitches = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
-        key_name = pitches[int(round(key_note.mean()))]
-        mode_name = "Major" if key_mode.mean() > 0 else "Minor"
-        # 将 '#' 替换为 's' 以便在文件名中使用
-        key_str = f"{key_name.replace('#', 's')}-{mode_name}"
+        # 2. 调性检测 (使用 pymusickit)
+        key_analysis = KeyFinder(audio_path)
 
-        print(f"  - Detected: {bpm:.1f} BPM, Key: {key_str}")
+        # 为了文件名兼容性, 将 '#' 替换为 's'
+        note = key_analysis.get_primary_key_corr()[
+            0
+        ]  # https://github.com/bin2ai/pymusickit/blob/1ade3d3e64a6447cd7ff4115546c626dd8229618/pymusickit/key_finder.py#L144C16-L144C56
+        key_str = f"{note.replace('#', 's').replace(' ', '_')}"
+    
+        print(f"  - Detected: {bpm:.1f} BPM, Key: {key_str} (via pymusickit)")
         return f"_{bpm_str}_{key_str}"
 
     except Exception as e:
@@ -108,11 +110,9 @@ def run_folder(model, args, config, device, verbose=False):
             print(f"  - Error loading file {path}: {e}")
             continue
 
-        # --- 新增: 调用分析函数并构建新的文件名 ---
-        # librosa的分析函数在单声道上效果最好
+        # --- 修改: 调用分析函数, 现在需要传入文件路径 'path' ---
         mix_mono_for_analysis = librosa.to_mono(mix.T)
-        analysis_suffix = analyze_audio_properties(mix_mono_for_analysis, sr)
-        # 将分析结果添加到基础文件名后
+        analysis_suffix = analyze_audio_properties(path, mix_mono_for_analysis, sr)
         output_base_filename = f"{base_filename}{analysis_suffix}"
 
         original_mono = False
@@ -150,7 +150,7 @@ def run_folder(model, args, config, device, verbose=False):
             if original_mono:
                 vocals_output = vocals_output[:, 0]
 
-            # --- 修改: 使用带有BPM和调性的新文件名来保存MP3 ---
+            # 使用带有BPM和调性的新文件名来保存MP3
             vocals_path_mp3 = os.path.join(
                 output_dir, f"{output_base_filename}_{instr}.mp3"
             )
