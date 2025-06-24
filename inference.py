@@ -13,13 +13,51 @@ import torch.nn as nn
 from utils import demix_track, get_model_from_config
 
 import librosa
-
-# --- 新增: 导入 pydub 用于保存 MP3 ---
 from pydub import AudioSegment
 
 import warnings
 
 warnings.filterwarnings("ignore")
+
+
+# --- 新增: BPM 和调性分析的辅助函数 ---
+def analyze_audio_properties(audio_mono, sr):
+    """
+    分析单声道音频的BPM和调性。
+
+    Args:
+        audio_mono (np.ndarray): 单声道音频波形数据。
+        sr (int): 采样率。
+
+    Returns:
+        str: 格式化后的BPM和调性字符串，例如 "_120bpm_C-Major"。
+             如果分析失败，则返回空字符串。
+    """
+    try:
+        # 1. BPM 检测
+        # librosa.beat.tempo 返回一个包含估计速度的数组，我们取第一个
+        bpm = librosa.beat.tempo(y=audio_mono, sr=sr)[0]
+        bpm_str = f"{int(round(bpm))}bpm"
+
+        # 2. 调性检测
+        # 首先计算色度图 (chromagram)
+        chroma = librosa.feature.chroma_stft(y=audio_mono, sr=sr)
+        # 使用 librosa 的内置函数估算调性
+        key_note, key_mode = librosa.feature.tonnetz(
+            y=librosa.effects.harmonic(audio_mono), sr=sr
+        )[-2:]
+        pitches = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+        key_name = pitches[int(round(key_note.mean()))]
+        mode_name = "Major" if key_mode.mean() > 0 else "Minor"
+        # 将 '#' 替换为 's' 以便在文件名中使用
+        key_str = f"{key_name.replace('#', 's')}-{mode_name}"
+
+        print(f"  - Detected: {bpm:.1f} BPM, Key: {key_str}")
+        return f"_{bpm_str}_{key_str}"
+
+    except Exception as e:
+        print(f"  - Could not analyze BPM/key: {e}")
+        return ""
 
 
 def run_folder(model, args, config, device, verbose=False):
@@ -70,6 +108,13 @@ def run_folder(model, args, config, device, verbose=False):
             print(f"  - Error loading file {path}: {e}")
             continue
 
+        # --- 新增: 调用分析函数并构建新的文件名 ---
+        # librosa的分析函数在单声道上效果最好
+        mix_mono_for_analysis = librosa.to_mono(mix.T)
+        analysis_suffix = analyze_audio_properties(mix_mono_for_analysis, sr)
+        # 将分析结果添加到基础文件名后
+        output_base_filename = f"{base_filename}{analysis_suffix}"
+
         original_mono = False
         if mix.ndim == 1:
             original_mono = True
@@ -105,13 +150,13 @@ def run_folder(model, args, config, device, verbose=False):
             if original_mono:
                 vocals_output = vocals_output[:, 0]
 
-            # --- 修改: 将输出格式改为 MP3，并彻底移除 WAV 输出代码 ---
-            vocals_path_mp3 = os.path.join(output_dir, f"{base_filename}_{instr}.mp3")
+            # --- 修改: 使用带有BPM和调性的新文件名来保存MP3 ---
+            vocals_path_mp3 = os.path.join(
+                output_dir, f"{output_base_filename}_{instr}.mp3"
+            )
 
-            # 将浮点数 NumPy 数组转换为 pydub 可以处理的格式
             vocals_int16 = (vocals_output * 32767).astype(np.int16)
 
-            # 创建 pydub 的 AudioSegment 对象
             num_channels = 1 if original_mono else 2
             audio_segment = AudioSegment(
                 vocals_int16.tobytes(),
@@ -120,11 +165,8 @@ def run_folder(model, args, config, device, verbose=False):
                 channels=num_channels,
             )
 
-            # 导出为 MP3 文件
             audio_segment.export(vocals_path_mp3, format="mp3", bitrate="192k")
             print(f"  - Saved vocal to: {os.path.normpath(vocals_path_mp3)}")
-
-        # --- 修改: 生成和保存伴奏文件的代码块已被完全删除 ---
 
     time.sleep(1)
     print("\nElapsed time: {:.2f} sec".format(time.time() - start_time))
