@@ -53,9 +53,9 @@ def analyze_audio_properties(audio_path, audio_mono, sr):
             0
         ]  # https://github.com/bin2ai/pymusickit/blob/1ade3d3e64a6447cd7ff4115546c626dd8229618/pymusickit/key_finder.py#L144C16-L144C56
         key_str = f"{note.replace('#', 's').replace(' ', '_')}"
-    
+
         print(f"  - Detected: {bpm:.1f} BPM, Key: {key_str} (via pymusickit)")
-        return f"_{bpm_str}_{key_str}"
+        return f"{key_str}_{bpm_str}_"
 
     except Exception as e:
         print(f"  - Could not analyze BPM/key: {e}")
@@ -113,7 +113,7 @@ def run_folder(model, args, config, device, verbose=False):
         # --- 修改: 调用分析函数, 现在需要传入文件路径 'path' ---
         mix_mono_for_analysis = librosa.to_mono(mix.T)
         analysis_suffix = analyze_audio_properties(path, mix_mono_for_analysis, sr)
-        output_base_filename = f"{base_filename}{analysis_suffix}"
+        output_base_filename = f"{analysis_suffix}{base_filename}"
 
         original_mono = False
         if mix.ndim == 1:
